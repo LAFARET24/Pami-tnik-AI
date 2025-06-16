@@ -12,37 +12,24 @@ from streamlit_mic_recorder import mic_recorder
 from gtts import gTTS
 
 # --- Konfiguracja ---
-DRIVE_FILE_NAME = "notes_git_data.txt" # Możesz zmienić na "moj_pamietnik.txt", jeśli chcesz
+DRIVE_FILE_NAME = "pamietnik_ai_data.txt" # Nowa nazwa pliku na notatki
 SCOPES = ["https://www.googleapis.com/auth/drive"]
 
-# --- OSTATECZNA FUNKCJA LOGOWANIA DLA "ROBOTA" ---
+# --- Funkcja logowania dla "Robota" ---
 @st.cache_resource
 def get_drive_service():
     try:
-        # Tworzymy słownik z danych logowania, pobierając każdą wartość osobno z sekretów
-        creds_info = {
-            "type": st.secrets.gcp_service_account.type,
-            "project_id": st.secrets.gcp_service_account.project_id,
-            "private_key_id": st.secrets.gcp_service_account.private_key_id,
-            # Ta linijka naprawia problem ze znakami nowej linii w kluczu prywatnym
-            "private_key": st.secrets.gcp_service_account.private_key.replace('\\n', '\n'),
-            "client_email": st.secrets.gcp_service_account.client_email,
-            "client_id": st.secrets.gcp_service_account.client_id,
-            "auth_uri": st.secrets.gcp_service_account.auth_uri,
-            "token_uri": st.secrets.gcp_service_account.token_uri,
-            "auth_provider_x509_cert_url": st.secrets.gcp_service_account.auth_provider_x509_cert_url,
-            "client_x509_cert_url": st.secrets.gcp_service_account.client_x509_cert_url,
-            "universe_domain": st.secrets.gcp_service_account.universe_domain
-        }
+        creds_info = dict(st.secrets.gcp_service_account)
+        creds_info['private_key'] = creds_info['private_key'].replace('\\n', '\n')
         creds = service_account.Credentials.from_service_account_info(creds_info, scopes=SCOPES)
         service = build("drive", "v3", credentials=creds)
         return service
     except Exception as e:
         st.error(f"Błąd logowania przez Service Account: {e}")
-        st.error("Sprawdź, czy wszystkie pola w [gcp_service_account] w 'Secrets' są poprawnie wklejone.")
+        st.error("Sprawdź, czy sekrety w Streamlit Cloud są poprawnie wklejone.")
         return None
 
-# Reszta funkcji bez zmian...
+# --- Funkcje do obsługi plików ---
 def get_file_id(service, file_name):
     query = f"name='{file_name}' and trashed=false"
     response = service.files().list(q=query, spaces='drive', fields='files(id, name)').execute()
@@ -81,7 +68,7 @@ def text_to_audio(text):
         audio_fp.seek(0)
         return audio_fp
     except Exception as e:
-        print(f"Błąd gTTS: {e}")
+        st.error(f"Błąd podczas generowania mowy: {e}")
         return None
 
 # --- Główna logika aplikacji Streamlit ---
@@ -89,14 +76,15 @@ st.set_page_config(page_title="Pamiętnik AI", page_icon="📝")
 st.title("📝 Pamiętnik AI")
 st.caption("Twój inteligentny pamiętnik zasilany przez AI.")
 
+# Inicjalizacja usług
 try:
     genai.configure(api_key=st.secrets.GEMINI_API_KEY)
+    drive_service = get_drive_service()
+    if not drive_service:
+        st.stop()
+    model = genai.GenerativeModel('gemini-1.5-flash')
 except Exception as e:
-    st.error(f"Błąd konfiguracji Gemini API: {e}")
-    st.stop()
-
-drive_service = get_drive_service()
-if not drive_service:
+    st.error(f"Błąd inicjalizacji: {e}. Sprawdź swoje sekrety w Streamlit Cloud.")
     st.stop()
 
 if "file_id" not in st.session_state:
@@ -104,42 +92,55 @@ if "file_id" not in st.session_state:
         st.session_state.file_id = get_file_id(drive_service, DRIVE_FILE_NAME)
 
 st.success("Połączono z Twoim prywatnym archiwum na Dysku Google.")
-model = genai.GenerativeModel('gemini-1.5-flash')
 
 def handle_prompt(prompt_text):
-    with st.chat_message("user"):
-        st.markdown(prompt_text)
+    st.session_state.messages.append({"role": "user", "content": prompt_text})
 
     keywords_save = ["zapisz", "zanotuj", "notatka", "pamiętaj"]
     is_saving = any(keyword in prompt_text.lower() for keyword in keywords_save)
-
-    with st.chat_message("assistant"):
-        with st.spinner("Przetwarzam..."):
-            if is_saving:
-                today_date = datetime.date.today().strftime("%Y-%m-%d")
-                new_note_entry = f"[DATA: {today_date}]\n{prompt_text}\n---"
-                upload_notes(drive_service, st.session_state.get("file_id"), DRIVE_FILE_NAME, new_note_entry)
-                response_text = "Notatka została zapisana w Twoim archiwum."
+    
+    with st.spinner("Przetwarzam..."):
+        if is_saving:
+            today_date = datetime.date.today().strftime("%Y-%m-%d")
+            new_note_entry = f"[DATA: {today_date}]\n{prompt_text}\n---"
+            upload_notes(drive_service, st.session_state.get("file_id"), DRIVE_FILE_NAME, new_note_entry)
+            response_text = "Notatka została zapisana w Twoim archiwum."
+        else:
+            notes_content = ""
+            if st.session_state.get("file_id"):
+                notes_content = download_notes(drive_service, st.session_state.get("file_id"))
+            if not notes_content.strip():
+                response_text = "Twoje archiwum jest jeszcze puste. Zapisz pierwszą notatkę!"
             else:
-                notes_content = ""
-                if st.session_state.get("file_id"):
-                    notes_content = download_notes(drive_service, st.session_state.get("file_id"))
-                if not notes_content.strip():
-                    response_text = "Twoje archiwum jest jeszcze puste. Zapisz pierwszą notatkę!"
-                else:
-                    system_prompt = (
-                        "Jesteś asystentem, który odpowiada na pytania wyłącznie na podstawie dostarczonych notatek z pamiętnika. "
-                        f"Oto notatki:\n{notes_content}\n\nPYTANIE: {prompt_text}"
-                    )
-                    response = model.generate_content(system_prompt)
-                    response_text = response.text
-            
-            st.markdown(response_text)
-            sound_file = text_to_audio(response_text)
-            if sound_file:
-                st.audio(sound_file, autoplay=True)
+                system_prompt = (
+                    "Jesteś asystentem, który odpowiada na pytania wyłącznie na podstawie dostarczonych notatek z pamiętnika. "
+                    f"Oto notatki:\n{notes_content}\n\nPYTANIE UŻYTKOWNIKA: {prompt_text}"
+                )
+                response = model.generate_content(system_prompt)
+                response_text = response.text
+        
+        st.session_state.messages.append({"role": "assistant", "content": response_text})
+        sound_file = text_to_audio(response_text)
+        if sound_file:
+            st.session_state.audio_to_play = sound_file
 
-st.write("Naciśnij i mów, aby dodać notatkę głosową lub zadać pytanie:")
+# Zarządzanie historią i interfejsem
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+if "audio_to_play" not in st.session_state:
+    st.session_state.audio_to_play = None
+
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+
+# Odtwarzaj dźwięk, jeśli jest w kolejce i wyczyść go
+if st.session_state.audio_to_play:
+    st.audio(st.session_state.audio_to_play, autoplay=True)
+    st.session_state.audio_to_play = None
+
+# Wejście głosowe
+st.write("Naciśnij i mów, aby dodać notatkę lub zadać pytanie:")
 audio_data = mic_recorder(start_prompt="▶️ Mów", stop_prompt="⏹️ Stop", just_once=True, key='mic1')
 
 if audio_data and audio_data['bytes']:
@@ -148,6 +149,9 @@ if audio_data and audio_data['bytes']:
         audio_file = {"mime_type": "audio/wav", "data": audio_bytes}
         prompt_from_voice = genai.GenerativeModel('gemini-1.5-flash').generate_content(["Zamień tę mowę na tekst: ", audio_file]).text
         handle_prompt(prompt_from_voice)
+        st.rerun() # Odśwież, żeby od razu pokazać odpowiedź
 
+# Wejście tekstowe
 if prompt_from_text := st.chat_input("...lub napisz tutaj"):
     handle_prompt(prompt_from_text)
+    st.rerun() # Odśwież, żeby od razu pokazać odpowiedź
