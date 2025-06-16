@@ -12,23 +12,37 @@ from streamlit_mic_recorder import mic_recorder
 from gtts import gTTS
 
 # --- Konfiguracja ---
-DRIVE_FILE_NAME = "notes_git_data.txt"
+DRIVE_FILE_NAME = "notes_git_data.txt" # Możesz zmienić na "moj_pamietnik.txt", jeśli chcesz
 SCOPES = ["https://www.googleapis.com/auth/drive"]
 
-# --- Funkcja logowania dla "Robota" ---
+# --- OSTATECZNA FUNKCJA LOGOWANIA DLA "ROBOTA" ---
 @st.cache_resource
 def get_drive_service():
     try:
-        creds_info = dict(st.secrets.gcp_service_account)
-        creds_info['private_key'] = creds_info['private_key'].replace('\\n', '\n')
+        # Tworzymy słownik z danych logowania, pobierając każdą wartość osobno z sekretów
+        creds_info = {
+            "type": st.secrets.gcp_service_account.type,
+            "project_id": st.secrets.gcp_service_account.project_id,
+            "private_key_id": st.secrets.gcp_service_account.private_key_id,
+            # Ta linijka naprawia problem ze znakami nowej linii w kluczu prywatnym
+            "private_key": st.secrets.gcp_service_account.private_key.replace('\\n', '\n'),
+            "client_email": st.secrets.gcp_service_account.client_email,
+            "client_id": st.secrets.gcp_service_account.client_id,
+            "auth_uri": st.secrets.gcp_service_account.auth_uri,
+            "token_uri": st.secrets.gcp_service_account.token_uri,
+            "auth_provider_x509_cert_url": st.secrets.gcp_service_account.auth_provider_x509_cert_url,
+            "client_x509_cert_url": st.secrets.gcp_service_account.client_x509_cert_url,
+            "universe_domain": st.secrets.gcp_service_account.universe_domain
+        }
         creds = service_account.Credentials.from_service_account_info(creds_info, scopes=SCOPES)
         service = build("drive", "v3", credentials=creds)
         return service
     except Exception as e:
         st.error(f"Błąd logowania przez Service Account: {e}")
+        st.error("Sprawdź, czy wszystkie pola w [gcp_service_account] w 'Secrets' są poprawnie wklejone.")
         return None
 
-# --- Funkcje do obsługi plików ---
+# Reszta funkcji bez zmian...
 def get_file_id(service, file_name):
     query = f"name='{file_name}' and trashed=false"
     response = service.files().list(q=query, spaces='drive', fields='files(id, name)').execute()
@@ -71,19 +85,18 @@ def text_to_audio(text):
         return None
 
 # --- Główna logika aplikacji Streamlit ---
-st.set_page_config(page_title="Notes Git", page_icon="📝")
-st.title("📝 Notes Git")
+st.set_page_config(page_title="Pamiętnik AI", page_icon="📝")
+st.title("📝 Pamiętnik AI")
 st.caption("Twój inteligentny pamiętnik zasilany przez AI.")
 
-# Inicjalizacja usług
 try:
     genai.configure(api_key=st.secrets.GEMINI_API_KEY)
-    drive_service = get_drive_service()
-    if not drive_service:
-        st.error("Nie udało się połączyć z usługą Dysku Google. Sprawdź sekrety w ustawieniach aplikacji.")
-        st.stop()
 except Exception as e:
-    st.error(f"Błąd inicjalizacji: {e}")
+    st.error(f"Błąd konfiguracji Gemini API: {e}")
+    st.stop()
+
+drive_service = get_drive_service()
+if not drive_service:
     st.stop()
 
 if "file_id" not in st.session_state:
